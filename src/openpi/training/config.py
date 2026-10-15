@@ -958,6 +958,41 @@ _CONFIGS = [
         val_repo_id="splitted_lerobot_and_school/val",
         val_interval=500,
     ),
+    TrainConfig(
+        # Tiny randomly initialized model on the real G1 data pipeline. Trains on CPU in minutes; used to produce a
+        # sample checkpoint for testing scripts (e.g. scripts/test_g1_dex3_checkpoint.py), not a usable policy.
+        name="pi05_g1_dex3_debug",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            max_token_len=256,
+            paligemma_variant="dummy",
+            action_expert_variant="dummy",
+        ),
+        data=LeRobotG1Dex3DataConfig(
+            repo_id="splitted_lerobot_and_school/train",
+            base_config=DataConfig(prompt_from_task=True),
+            assets=AssetsConfig(assets_dir="./assets/pi05_g1_dex3"),
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=50,
+            peak_lr=3e-4,
+            decay_steps=1_000_000,
+            decay_lr=3e-4,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        batch_size=8,
+        num_train_steps=10,
+        save_interval=5,  # Checkpoints at step 5 and the final step 9.
+        keep_period=5,
+        log_interval=1,
+        num_workers=2,
+        wandb_enabled=False,
+        val_repo_id="splitted_lerobot_and_school/val",
+        val_interval=5,
+        val_num_batches=2,
+    ),
     #
     # Fine-tuning DROID configs.
     #

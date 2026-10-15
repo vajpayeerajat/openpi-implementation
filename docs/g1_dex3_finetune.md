@@ -1,5 +1,12 @@
 # Fine-tuning pi0.5 on the Unitree G1 + Dex3 dataset
 
+
+to download the repo - 
+git clone <>
+then 
+git submodule update --init
+
+
 Configs: `pi05_g1_dex3` (full fine-tune) and `pi05_g1_dex3_lora` (LoRA, low memory).
 Code: `src/openpi/policies/g1_dex3_policy.py`, `LeRobotG1Dex3DataConfig` in `src/openpi/training/config.py`.
 
@@ -54,7 +61,20 @@ uvx tensorboard --logdir checkpoints/pi05_g1_dex3 --port 6006
 #    train/loss early on. Same rng and samples every time, so points are directly comparable.
 #    Train and val loss on one chart: "Custom Scalars" tab -> loss -> "train vs val".
 
-# 3. Offline eval on the held-out splits (MAE in radians, per joint group and horizon)
+# 3a. Pass/fail checkpoint test before using it on the robot (exit code 1 on failure): loads, output shape,
+#     43- vs 28-dim state, finite actions, correct action space, actions inside the training joint range
+uv run scripts/test_g1_dex3_checkpoint.py --checkpoint-dir checkpoints/pi05_g1_dex3/run1/49999
+
+##### demo run
+export HF_LEROBOT_HOME=/mnt/drive2/rajat_ws/datasets
+uv run scripts/test_g1_dex3_checkpoint.py --config-name pi05_g1_dex3_debug \
+    --checkpoint-dir checkpoints/pi05_g1_dex3_debug/sample/9
+
+# Your real runs use the default config name:
+uv run scripts/test_g1_dex3_checkpoint.py --checkpoint-dir checkpoints/pi05_g1_dex3/run1/<step>
+
+
+# 3b. Offline eval on the held-out splits (MAE in radians, per joint group and horizon)
 uv run scripts/eval_g1_dex3_offline.py --checkpoint-dir checkpoints/pi05_g1_dex3/run1/49999 --split val
 uv run scripts/eval_g1_dex3_offline.py --checkpoint-dir checkpoints/pi05_g1_dex3/run1/49999 --split test
 
