@@ -1,0 +1,16 @@
+# Run all commands from the repo folder: /mnt/drive2/rajat_ws/tasks/openpi-implementation
+
+# 1. Set the dataset location (do this once in every new terminal)
+export HF_LEROBOT_HOME=/mnt/drive2/rajat_ws/datasets
+
+# 2. Train the model
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_g1_dex3 --exp-name=run1 --overwrite --log-interval=50 --keep-period=25000
+
+# 2b. Continue a stopped training run (use --resume, not --overwrite)
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_g1_dex3 --exp-name=run1 --resume --log-interval=50 --keep-period=25000
+
+# 3. Watch training in TensorBoard (open http://localhost:6006 in the browser)
+uvx tensorboard --logdir checkpoints/pi05_g1_dex3 --port 6006
+
+# 4. Test a saved checkpoint (replace 25000 with the step number you want)
+uv run scripts/test_g1_dex3_checkpoint.py --checkpoint-dir checkpoints/pi05_g1_dex3/run1/25000
