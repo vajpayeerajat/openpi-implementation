@@ -575,6 +575,18 @@ class TrainConfig:
     # If true, will write TensorBoard event files to `<checkpoint_dir>/tensorboard`.
     tensorboard_enabled: bool = True
 
+    # Hugging Face Hub repo ("user/name") to upload checkpoints and TensorBoard logs to. When set, every saved
+    # checkpoint's params and assets are uploaded to `checkpoints/<step>/` (TensorBoard logs to `runs/`) in the
+    # background, and only the latest checkpoint is kept locally (needed for --resume). Requires `huggingface-cli login`.
+    hub_repo_id: str | None = None
+    # Also upload the optimizer state (several times the size of params) so a run can be resumed on another machine.
+    hub_upload_train_state: bool = False
+    # Create the Hub repo as private.
+    hub_private: bool = True
+    # Also upload the TensorBoard logs every this many steps (they are always uploaded with each checkpoint). Each upload
+    # is a Hub commit, so very small values create many commits. None: only with checkpoints.
+    hub_tensorboard_interval: int | None = None
+
     # LeRobot repo id of a held-out split to compute a validation loss on. It is loaded with the training data config,
     # so it must have the same format as the training dataset. If None, no validation is run.
     val_repo_id: str | None = None
@@ -582,6 +594,9 @@ class TrainConfig:
     val_interval: int = 1000
     # Number of batches (of `batch_size`) in the fixed validation subset.
     val_num_batches: int = 20
+    # Batch size for computing the validation loss; None uses `batch_size`. A smaller value needs less GPU memory and
+    # evaluates the same `val_num_batches * batch_size` frames, so the validation loss stays comparable.
+    val_batch_size: int | None = None
 
     # Used to pass metadata to the policy server.
     policy_metadata: dict[str, Any] | None = None
@@ -916,7 +931,7 @@ _CONFIGS = [
         ema_decay=0.999,
         batch_size=32,
         num_train_steps=50_000,  # ~2.9 epochs over 557k frames at batch 32.
-        save_interval=2_500,
+        save_interval=1_000,
         keep_period=10_000,
         num_workers=8,
         # Log to TensorBoard (<checkpoint_dir>/tensorboard) only.
@@ -949,7 +964,7 @@ _CONFIGS = [
         ema_decay=None,
         batch_size=32,
         num_train_steps=50_000,
-        save_interval=2_500,
+        save_interval=1_000,
         keep_period=10_000,
         num_workers=8,
         # Log to TensorBoard (<checkpoint_dir>/tensorboard) only.

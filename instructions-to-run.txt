@@ -6,11 +6,39 @@ export HF_LEROBOT_HOME=/mnt/drive2/rajat_ws/datasets
 # 2. Train the model
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_g1_dex3 --exp-name=run1 --overwrite --log-interval=50 --keep-period=25000
 
+## 2.1 FROM BREV
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_g1_dex3_statenoise \
+    --exp-name=stage1_noise003 --overwrite --log-interval=50 --hub-tensorboard-interval=50 \
+    --hub-repo-id=rajat-vajpayee/pi05-g1-dex3-stage1-noise003_brev --no-hub-private  2>&1 | tee train_stage1.log
+
 # 2b. Continue a stopped training run (use --resume, not --overwrite)
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_g1_dex3 --exp-name=run1 --resume --log-interval=50 --keep-period=25000
 
 # 3. Watch training in TensorBoard (open http://localhost:6006 in the browser)
 uvx tensorboard --logdir checkpoints/pi05_g1_dex3 --port 6006
 
+## 3.1 FROM BREV 
+ssh -L 6006:localhost:6006 <instance> \
+    'cd ~/openpi-implementation && uvx tensorboard --logdir checkpoints/pi05_g1_dex3_statenoise --port 6006'
+# then open http://localhost:6006
+
+
 # 4. Test a saved checkpoint (replace 25000 with the step number you want)
 uv run scripts/test_g1_dex3_checkpoint.py --checkpoint-dir checkpoints/pi05_g1_dex3/run1/25000
+
+# --- Saving to Hugging Face instead of keeping checkpoints locally ---
+
+# 5. Log in to Hugging Face once on the training machine (needs a token with write access)
+uv run huggingface-cli login
+
+# 6. Train and upload every checkpoint (every 1000 steps) and the TensorBoard logs to a private HF repo.
+#    Only the latest checkpoint stays on local disk (for --resume).
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_g1_dex3_statenoise --exp-name=stage1_noise003 --overwrite --log-interval=50 --hub-repo-id=<your-hf-user>/pi05-g1-dex3-stage1-noise003
+
+# 7. Download one checkpoint from HF to test it (replace the step number)
+uv run huggingface-cli download <your-hf-user>/pi05-g1-dex3-stage1-noise003 --include "checkpoints/5000/*" --local-dir hub_checkpoints/stage1_noise003
+uv run scripts/test_g1_dex3_checkpoint.py --config-name pi05_g1_dex3_statenoise --checkpoint-dir hub_checkpoints/stage1_noise003/checkpoints/5000
+
+# 8. TensorBoard from HF: download the logs, then open them
+uv run huggingface-cli download <your-hf-user>/pi05-g1-dex3-stage1-noise003 --include "runs/*" --local-dir hub_checkpoints/stage1_noise003
+uvx tensorboard --logdir hub_checkpoints/stage1_noise003/runs --port 6006

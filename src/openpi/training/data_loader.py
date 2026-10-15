@@ -278,8 +278,9 @@ def create_val_data_loader(
     """Create a loader over a fixed subset of the validation dataset (`config.val_repo_id`).
 
     Uses the training data config, so the transforms and norm stats are the training ones; only the dataset differs.
-    The subset is `val_num_batches * batch_size` frames spread evenly over the whole dataset, and every pass over the
-    loader yields the same batches in the same order, so the validation loss is comparable across evaluations.
+    The subset is `val_num_batches * batch_size` frames spread evenly over the whole dataset (evaluated in batches of
+    `val_batch_size`), and every pass over the loader yields the same batches in the same order, so the validation loss
+    is comparable across evaluations.
     """
     if config.val_repo_id is None:
         raise ValueError("config.val_repo_id is not set.")
@@ -287,16 +288,23 @@ def create_val_data_loader(
     dataset = create_torch_dataset(data_config, config.model.action_horizon, config.model)
     dataset = transform_dataset(dataset, data_config)
 
+    # The subset is defined by `batch_size`, so a smaller `val_batch_size` evaluates the same frames in more batches.
+    batch_size = config.val_batch_size or config.batch_size
+    if batch_size % jax.device_count() != 0:
+        raise ValueError(
+            f"val batch size {batch_size} must be divisible by the number of devices {jax.device_count()}."
+        )
     num_samples = min(config.val_num_batches * config.batch_size, len(dataset))
+    num_samples -= num_samples % batch_size
     indices = np.linspace(0, len(dataset) - 1, num_samples).astype(int).tolist()
     dataset = torch.utils.data.Subset(typing.cast(torch.utils.data.Dataset, dataset), indices)
 
     data_loader = TorchDataLoader(
         dataset,
-        local_batch_size=config.batch_size // jax.process_count(),
+        local_batch_size=batch_size // jax.process_count(),
         sharding=sharding,
         shuffle=False,
-        num_batches=num_samples // config.batch_size,
+        num_batches=num_samples // batch_size,
         num_workers=num_workers,
     )
     return DataLoaderImpl(data_config, data_loader)
