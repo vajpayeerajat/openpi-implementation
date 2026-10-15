@@ -74,6 +74,9 @@ class DataConfig:
     # Used to adopt the inputs from a dataset specific format to a common format
     # which is expected by the data transforms.
     repack_transforms: _transforms.Group = dataclasses.field(default_factory=_transforms.Group)
+    # Training-only augmentations (e.g. state noise). Applied right after the repack transforms, and only by the
+    # training data loader: never for validation, norm stats or inference.
+    train_transforms: _transforms.Group = dataclasses.field(default_factory=_transforms.Group)
     # Data transforms, typically include robot specific transformations. Will be applied
     # before the data is normalized. See `model.Observation` and `model.Actions` to learn about the
     # normalized data.
@@ -363,6 +366,9 @@ class LeRobotG1Dex3DataConfig(DataConfigFactory):
     # The dataset stores absolute joint targets. Convert the arms to deltas relative to the current state;
     # the hands stay absolute because they hold open/closed for long stretches and deltas would drift.
     use_delta_joint_actions: bool = True
+    # Std (rad) of Gaussian noise added to the arm joints of the state during training only; 0 disables it.
+    # Added before the arm deltas are computed, to discourage simply continuing the current arm motion.
+    state_noise_std: float = 0.0
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -392,11 +398,23 @@ class LeRobotG1Dex3DataConfig(DataConfigFactory):
                 outputs=[_transforms.AbsoluteActions(g1_dex3_policy.DELTA_ACTION_MASK)],
             )
 
+        train_transforms = _transforms.Group()
+        if self.state_noise_std > 0:
+            # Runs right after the repack, where the state is still under its client key.
+            train_transforms = _transforms.Group(
+                inputs=[
+                    _transforms.AddStateNoise(
+                        g1_dex3_policy.ARM_MASK, std=self.state_noise_std, key="observation/state"
+                    )
+                ]
+            )
+
         model_transforms = ModelTransformFactory()(model_config)
 
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
             repack_transforms=repack_transform,
+            train_transforms=train_transforms,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
             action_sequence_keys=("action",),
@@ -1137,6 +1155,25 @@ _CONFIGS = [
     *roboarena_config.get_roboarena_configs(),
     *polaris_config.get_polaris_configs(),
 ]
+
+
+def _g1_dex3_with_state_noise(name: str, std: float) -> TrainConfig:
+    """pi05_g1_dex3 with training-only state noise on the arm joints; everything else identical, so runs compare."""
+    base = next(c for c in _CONFIGS if c.name == "pi05_g1_dex3")
+    assert isinstance(base.data, LeRobotG1Dex3DataConfig)
+    return dataclasses.replace(
+        base,
+        name=name,
+        data=dataclasses.replace(
+            base.data,
+            state_noise_std=std,
+            # The noise does not change the data statistics, so reuse pi05_g1_dex3's norm stats.
+            assets=AssetsConfig(assets_dir="./assets/pi05_g1_dex3"),
+        ),
+    )
+
+
+_CONFIGS.append(_g1_dex3_with_state_noise("pi05_g1_dex3_statenoise", std=0.03))
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
     raise ValueError("Config names must be unique.")

@@ -244,6 +244,43 @@ class AbsoluteActions(DataTransformFn):
         return data
 
 
+# One generator per process: data loader workers are separate processes, so each draws its own noise.
+_NOISE_RNGS: dict[int, np.random.Generator] = {}
+
+
+@dataclasses.dataclass(frozen=True)
+class AddStateNoise(DataTransformFn):
+    """Adds Gaussian noise to the masked state dimensions. Training only (see `DataConfig.train_transforms`).
+
+    Applied before `DeltaActions`, so delta targets are taken relative to the noisy state: the model has to reach the
+    correct absolute target without knowing the exact state, which discourages simply continuing the current motion.
+    """
+
+    # Boolean mask for the state dimensions to add noise to. Length can be smaller than the number of dimensions.
+    # If None, this transform is a no-op. See `make_bool_mask` for more details.
+    mask: Sequence[bool] | None
+    # Standard deviation of the noise, in the state's units (rad for joint positions).
+    std: float
+    # Key of the state in the data dict at the point where this transform runs.
+    key: str = "state"
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if self.mask is None or self.std <= 0:
+            return data
+
+        import os
+
+        rng = _NOISE_RNGS.setdefault(os.getpid(), np.random.default_rng())
+        # Copy: the state can share memory with the dataset sample.
+        state = np.array(data[self.key], dtype=np.float32)
+        mask = np.asarray(self.mask)
+        dims = mask.shape[-1]
+        state[..., :dims] += np.where(mask, rng.normal(0.0, self.std, state[..., :dims].shape), 0).astype(np.float32)
+        data[self.key] = state
+
+        return data
+
+
 @dataclasses.dataclass(frozen=True)
 class TokenizePrompt(DataTransformFn):
     tokenizer: _tokenizer.PaligemmaTokenizer

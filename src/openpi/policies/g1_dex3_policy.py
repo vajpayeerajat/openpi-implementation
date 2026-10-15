@@ -36,9 +36,11 @@ G1_JOINTS = (
     "right_hand_thumb_0_joint", "right_hand_thumb_1_joint", "right_hand_thumb_2_joint",
 )  # fmt: skip
 
-# Delta on the arms, absolute on the hands. Dims interleave as [arm, hand, arm, hand], so this is
-# NOT make_bool_mask(14, -14), which would put the right arm on absolute and the left hand on delta.
-DELTA_ACTION_MASK = transforms.make_bool_mask(7, -7, 7, -7)
+# Arm joints of the 28 dims. They interleave as [arm, hand, arm, hand], so this is NOT make_bool_mask(14, -14).
+ARM_MASK = transforms.make_bool_mask(7, -7, 7, -7)
+
+# Delta on the arms, absolute on the hands.
+DELTA_ACTION_MASK = ARM_MASK
 
 
 def make_g1_dex3_example() -> dict:
