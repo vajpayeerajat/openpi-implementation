@@ -612,6 +612,9 @@ class TrainConfig:
     val_interval: int = 1000
     # Number of batches (of `batch_size`) in the fixed validation subset.
     val_num_batches: int = 20
+    # Batch size for computing the validation loss; None uses `batch_size`. A smaller value needs less GPU memory and
+    # evaluates the same `val_num_batches * batch_size` frames, so the validation loss stays comparable.
+    val_batch_size: int | None = None
 
     # Used to pass metadata to the policy server.
     policy_metadata: dict[str, Any] | None = None
