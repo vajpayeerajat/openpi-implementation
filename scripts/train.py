@@ -25,6 +25,7 @@ import openpi.shared.nnx_utils as nnx_utils
 import openpi.training.checkpoints as _checkpoints
 import openpi.training.config as _config
 import openpi.training.data_loader as _data_loader
+import openpi.training.hub_sync as _hub_sync
 import openpi.training.optimizer as _optimizer
 import openpi.training.sharding as sharding
 import openpi.training.utils as training_utils
@@ -271,10 +272,19 @@ def main(config: _config.TrainConfig):
 
     checkpoint_manager, resuming = _checkpoints.initialize_checkpoint_dir(
         config.checkpoint_dir,
-        keep_period=config.keep_period,
+        # With Hub uploads every checkpoint lives on the Hub, so keep only the latest one locally (for --resume).
+        keep_period=None if config.hub_repo_id else config.keep_period,
         overwrite=config.overwrite,
         resume=config.resume,
     )
+    hub = None
+    if config.hub_repo_id:
+        hub = _hub_sync.HubSync(
+            config.hub_repo_id,
+            tensorboard_dir=config.checkpoint_dir / "tensorboard" if config.tensorboard_enabled else None,
+            private=config.hub_private,
+            upload_train_state=config.hub_upload_train_state,
+        )
     init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
 
     data_loader = _data_loader.create_data_loader(
@@ -364,6 +374,8 @@ def main(config: _config.TrainConfig):
                 tb_writer.add_scalar("perf/data_wait_fraction", data_time / elapsed, step)
                 tb_writer.flush()
                 last_log_time, last_log_step, data_time = now, step, 0.0
+                if hub is not None and config.hub_tensorboard_interval and step % config.hub_tensorboard_interval == 0:
+                    hub.upload_tensorboard(block=False)
             infos = []
         if val_loader is not None and (step % config.val_interval == 0 or step == config.num_train_steps - 1):
             val_start = time.perf_counter()
@@ -382,12 +394,23 @@ def main(config: _config.TrainConfig):
         data_time += time.perf_counter() - data_start
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
+            if hub is not None:
+                # Saving deletes the previous local checkpoint, so its upload must have finished.
+                hub.wait()
             _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
+            if hub is not None:
+                # Upload only fully written checkpoints.
+                checkpoint_manager.wait_until_finished()
+                hub.upload_checkpoint(config.checkpoint_dir / str(step), step)
 
     logging.info("Waiting for checkpoint manager to finish")
     checkpoint_manager.wait_until_finished()
     if tb_writer is not None:
         tb_writer.close()
+    if hub is not None:
+        logging.info("Waiting for Hub uploads to finish")
+        hub.upload_tensorboard()
+        hub.close()
 
 
 if __name__ == "__main__":
