@@ -9,6 +9,7 @@ from typing_extensions import override
 
 from openpi.models import model as _model
 from openpi.models import pi0_config
+import openpi.models.dinov3 as _dinov3
 import openpi.models.gemma as _gemma
 import openpi.models.siglip as _siglip
 from openpi.shared import array_typing as at
@@ -89,6 +90,17 @@ class Pi0(_model.BaseModel):
         )
         img.lazy_init(next(iter(config.fake_obs().images.values())), train=False, rngs=rngs)
         self.PaliGemma = nnx.Dict(llm=llm, img=img)
+        self.use_dino = config.dino_variant is not None
+        if self.use_dino:
+            dino_width = _dinov3.get_config(config.dino_variant)["width"]
+            dino = nnx_bridge.ToNNX(_dinov3.Module(variant=config.dino_variant, dtype_mm=config.dtype))
+            dino.lazy_init(next(iter(config.fake_obs().images.values())), rngs=rngs)
+            self.dino = dino
+            self.dino_norm = nnx.LayerNorm(dino_width, rngs=rngs)
+            # Zero init: at step 0 the image tokens are exactly the SigLIP tokens.
+            self.dino_proj = nnx.Linear(
+                dino_width, paligemma_config.width, kernel_init=nnx.initializers.zeros, rngs=rngs
+            )
         self.action_in_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
         if config.pi05:
             self.time_mlp_in = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
@@ -112,6 +124,12 @@ class Pi0(_model.BaseModel):
         # embed images
         for name in obs.images:
             image_tokens, _ = self.PaliGemma.img(obs.images[name], train=False)
+            if self.use_dino:
+                # Both encoders give a 16x16 patch grid in the same row-major order, so token i of each covers the
+                # same image region and they can be summed.
+                dino_tokens = jax.lax.stop_gradient(self.dino(obs.images[name]))
+                dino_tokens = self.dino_proj(self.dino_norm(dino_tokens))
+                image_tokens = image_tokens + dino_tokens.astype(image_tokens.dtype)
 
             tokens.append(image_tokens)
             input_mask.append(

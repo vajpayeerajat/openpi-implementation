@@ -11,6 +11,16 @@ XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_g1_dex3_statenoi
     --exp-name=stage1_noise003 --overwrite --log-interval=50 --hub-tensorboard-interval=50 \
     --hub-repo-id=rajat-vajpayee/pi05-g1-dex3-stage1-noise003_brev --no-hub-private  2>&1 | tee train_stage1.log
 
+## 2.2 DINOv3 + SigLIP (stage 0 + frozen DINOv3 ViT-B/16 added to the SigLIP tokens)
+# Needs HF login on the machine, with the DINOv3 license accepted on
+# https://huggingface.co/facebook/dinov3-vitb16-pretrain-lvd1689m (the weights download on the first run).
+# Quick 10-step check first (tiny Gemma, real DINOv3 weights):
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_g1_dex3_dinov3_debug --exp-name=dino_debug --overwrite
+# Full run:
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_g1_dex3_dinov3 \
+    --exp-name=dinov3_b16 --overwrite --log-interval=50 --hub-tensorboard-interval=50 \
+    --hub-repo-id=rajat-vajpayee/pi05-g1-dex3-dinov3-b16 2>&1 | tee train_dinov3.log
+
 # 2b. Continue a stopped training run (use --resume, not --overwrite)
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_g1_dex3 --exp-name=run1 --resume --log-interval=50 --keep-period=25000
 

@@ -7,6 +7,7 @@ import jax.numpy as jnp
 from typing_extensions import override
 
 from openpi.models import model as _model
+import openpi.models.dinov3 as _dinov3
 import openpi.models.gemma as _gemma
 from openpi.shared import array_typing as at
 import openpi.shared.nnx_utils as nnx_utils
@@ -31,6 +32,9 @@ class Pi0Config(_model.BaseModelConfig):
     pi05: bool = False
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
+    # If set, a frozen DINOv3 encoder of this variant runs on every camera, and its patch tokens are added to the
+    # SigLIP image tokens through a zero-initialized projection (so the model starts out identical to pi0/pi05).
+    dino_variant: _dinov3.Variant | None = None
 
     pytorch_compile_mode: str | None = "max-autotune"
 
@@ -112,6 +116,9 @@ class Pi0Config(_model.BaseModelConfig):
             filters.append(
                 nnx.Not(nnx_utils.PathRegex(".*lora.*")),
             )
-        if not filters:
-            return nnx.Nothing
-        return nnx.All(*filters)
+        freeze = nnx.All(*filters) if filters else nnx.Nothing
+        if self.dino_variant is not None:
+            # The DINOv3 encoder is always frozen; its fusion layers (dino_norm, dino_proj) are trained.
+            dino_filter = nnx_utils.PathRegex("dino/.*")
+            freeze = nnx.Any(freeze, dino_filter) if filters else dino_filter
+        return freeze

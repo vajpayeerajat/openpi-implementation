@@ -1153,6 +1153,35 @@ _CONFIGS = [
     *polaris_config.get_polaris_configs(),
 ]
 
+
+def _g1_dex3_with_dinov3(base_name: str, name: str) -> TrainConfig:
+    """`base_name` plus a frozen DINOv3 ViT-B/16 on every camera, added to the SigLIP tokens (see `Pi0Config`).
+
+    Everything else (data, optimizer, steps, validation) is copied from the base config, and its norm stats are
+    reused.
+    """
+    base = next(c for c in _CONFIGS if c.name == base_name)
+    model = dataclasses.replace(base.model, dino_variant="B/16")
+    params_path = None
+    if isinstance(base.weight_loader, weight_loaders.CheckpointWeightLoader):
+        params_path = base.weight_loader.params_path
+    return dataclasses.replace(
+        base,
+        name=name,
+        model=model,
+        data=dataclasses.replace(base.data, assets=AssetsConfig(assets_dir="./assets/pi05_g1_dex3")),
+        weight_loader=weight_loaders.DinoV3WeightLoader(params_path, variant="B/16"),
+        freeze_filter=model.get_freeze_filter(),
+    )
+
+
+_CONFIGS += [
+    # DINOv3 + SigLIP: stage 0 plus DINOv3 features.
+    _g1_dex3_with_dinov3("pi05_g1_dex3", "pi05_g1_dex3_dinov3"),
+    # Tiny Gemma (random), real SigLIP shape and real DINOv3 weights: checks the DINO path end to end.
+    _g1_dex3_with_dinov3("pi05_g1_dex3_debug", "pi05_g1_dex3_dinov3_debug"),
+]
+
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
     raise ValueError("Config names must be unique.")
 _CONFIGS_DICT = {config.name: config for config in _CONFIGS}
