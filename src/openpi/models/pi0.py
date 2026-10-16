@@ -129,6 +129,11 @@ class Pi0(_model.BaseModel):
                 # same image region and they can be summed.
                 dino_tokens = jax.lax.stop_gradient(self.dino(obs.images[name]))
                 dino_tokens = self.dino_proj(self.dino_norm(dino_tokens))
+                # RAJAT :  This is the addition of DINO tokens to SigLIP tokens
+                # As of now, its direct element wise addition of the two tokens similar to OpenVLA.
+                # TODO : Bi-directional attention between DINO and SigLIP tokens, where
+                #        DINO tokens attend to SigLIP tokens and vice versa.
+                #        This will help in the training of the DINO tokens.
                 image_tokens = image_tokens + dino_tokens.astype(image_tokens.dtype)
 
             tokens.append(image_tokens)
