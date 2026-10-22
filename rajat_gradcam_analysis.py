@@ -32,6 +32,12 @@ Usage:
   uv run rajat_gradcam_analysis.py --config_name pi05_g1_dex3_debug --checkpoint checkpoints/pi05_g1_dex3_debug/sample/9
 Compare:
   uv run rajat_gradcam_analysis.py --compare plots/gradcam/<run1> plots/gradcam/<run2>
+
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.3 uv run rajat_gradcam_analysis.py \
+    --config_name pi05_g1_dex3 \
+    --checkpoint checkpoints/pi05-g1-dex3-stage1-noise003_hf_brev/checkpoints/7000 \
+    --out_dir plots/gradcam/stage1_noise003__7000
+
 """
 
 import argparse
@@ -402,7 +408,8 @@ class Pi05Backend:
     def text_groups(self, prompt, state28):
         cleaned, full = pi05_prompt_string(prompt, state28)
         sp = self.tokenizer._tokenizer  # noqa: SLF001
-        proto = sp.encode(full, out_type="proto")
+        # "immutable_proto" gives piece objects with offsets; "proto" returns serialized bytes in sentencepiece>=0.2.
+        proto = sp.encode(full, out_type="immutable_proto")
         offsets = [(-1, -1)] + [(p.begin, p.end) for p in proto.pieces]  # BOS first
         ids = np.asarray([sp.bos_id()] + [p.id for p in proto.pieces])
         return (ids, *token_groups(cleaned, full, offsets))
