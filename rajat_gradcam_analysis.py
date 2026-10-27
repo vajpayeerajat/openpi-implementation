@@ -32,6 +32,11 @@ Usage:
   uv run rajat_gradcam_analysis.py --config_name pi05_g1_dex3_debug --checkpoint checkpoints/pi05_g1_dex3_debug/sample/9
 Compare:
   uv run rajat_gradcam_analysis.py --compare plots/gradcam/<run1> plots/gradcam/<run2>
+
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run rajat_gradcam_analysis.py \
+  --checkpoint checkpoints/pi05-g1-dex3-dinov3-b16-96gb/checkpoints/25000 \
+  --config_name pi05_g1_dex3_dinov3
+
 """
 
 import argparse
@@ -53,7 +58,7 @@ from PIL import Image
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 DEFAULT_CONFIG = "pi05_g1_dex3"
-DATASET_ROOT = "/mnt/drive2/rajat_ws/datasets/splitted_lerobot_and_school"
+DATASET_ROOT = "/home/rajat/work/Datasets/splitted_lerobot_and_school"
 FPS = 20
 STOPWORDS = {"a", "an", "the", "and", "or", "in", "on", "at", "to", "it", "is", "of", "up", "with", "for"}
 
@@ -402,7 +407,7 @@ class Pi05Backend:
     def text_groups(self, prompt, state28):
         cleaned, full = pi05_prompt_string(prompt, state28)
         sp = self.tokenizer._tokenizer  # noqa: SLF001
-        proto = sp.encode(full, out_type="proto")
+        proto = sp.encode_as_immutable_proto(full)  # encode(out_type="proto") returns bytes in sentencepiece >= 0.2
         offsets = [(-1, -1)] + [(p.begin, p.end) for p in proto.pieces]  # BOS first
         ids = np.asarray([sp.bos_id()] + [p.id for p in proto.pieces])
         return (ids, *token_groups(cleaned, full, offsets))
