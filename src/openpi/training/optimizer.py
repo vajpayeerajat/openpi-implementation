@@ -1,10 +1,12 @@
 import dataclasses
 from typing import Protocol, runtime_checkable
 
+import flax.nnx as nnx
 import jax.numpy as jnp
 import optax
 
 import openpi.shared.array_typing as at
+import openpi.shared.nnx_utils as nnx_utils
 
 
 @runtime_checkable
@@ -102,8 +104,31 @@ class SGD(OptimizerConfig):
         return optax.sgd(lr, momentum=self.momentum, nesterov=self.nesterov)
 
 
+def scale_by_filter(filter: nnx.filterlib.Filter, mult: float) -> optax.GradientTransformation:
+    """Scales the updates (an `nnx.State`) of the params matching `filter` by `mult`.
+
+    Applied after the optimizer, this trains those params at `lr * mult` (`BaseModelConfig.get_lr_mult`).
+    """
+
+    def init_fn(params):
+        del params
+        return optax.EmptyState()
+
+    def update_fn(updates, state, params=None):
+        del params
+        return nnx_utils.state_map(updates, filter, lambda v: v.replace(v.value * mult)), state
+
+    return optax.GradientTransformation(init_fn, update_fn)
+
+
 def create_optimizer(
-    optimizer: OptimizerConfig, lr_schedule: LRScheduleConfig, weight_decay_mask: at.PyTree | None = None
+    optimizer: OptimizerConfig,
+    lr_schedule: LRScheduleConfig,
+    weight_decay_mask: at.PyTree | None = None,
+    lr_mult: tuple[nnx.filterlib.Filter, float] | None = None,
 ) -> optax.GradientTransformation:
     lr = lr_schedule.create()
-    return optimizer.create(lr, weight_decay_mask=weight_decay_mask)
+    tx = optimizer.create(lr, weight_decay_mask=weight_decay_mask)
+    if lr_mult is not None:
+        tx = optax.chain(tx, scale_by_filter(*lr_mult))
+    return tx

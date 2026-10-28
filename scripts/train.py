@@ -115,7 +115,9 @@ def _load_weights_and_validate(loader: _weight_loaders.WeightLoader, params_shap
 def init_train_state(
     config: _config.TrainConfig, init_rng: at.KeyArrayLike, mesh: jax.sharding.Mesh, *, resume: bool
 ) -> tuple[training_utils.TrainState, Any]:
-    tx = _optimizer.create_optimizer(config.optimizer, config.lr_schedule, weight_decay_mask=None)
+    tx = _optimizer.create_optimizer(
+        config.optimizer, config.lr_schedule, weight_decay_mask=None, lr_mult=config.model.get_lr_mult()
+    )
 
     def init(rng: at.KeyArrayLike, partial_params: at.Params | None = None) -> training_utils.TrainState:
         rng, model_rng = jax.random.split(rng)
@@ -186,6 +188,8 @@ def train_step(
     # Filter out frozen params.
     diff_state = nnx.DiffState(0, config.trainable_filter)
     loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(model, train_rng, observation, actions)
+    # Scalars the model sowed during the loss (e.g. DINO token RMS); popped so they don't end up in the params.
+    intermediates = nnx.pop(model, nnx.Intermediate)
 
     params = state.params.filter(config.trainable_filter)
     updates, new_opt_state = state.tx.update(grads, state.opt_state, params)
@@ -218,6 +222,14 @@ def train_step(
         "grad_norm": optax.global_norm(grads),
         "param_norm": optax.global_norm(kernel_params),
     }
+    for path, value in intermediates.flat_state().items():
+        info["/".join(str(p) for p in path)] = jnp.mean(jnp.asarray(value.value))
+    if getattr(config.model, "dino_fusion", "none") == "expert_stream":
+        for name in ("dino_gate", "dino_attn_gate"):
+            gate = jnp.tanh(getattr(model, name).value)
+            info[f"{name}_mean"] = jnp.mean(gate)
+            info[f"{name}_absmax"] = jnp.max(jnp.abs(gate))
+        info["dino_grad_norm"] = optax.global_norm(grads.filter(nnx_utils.PathRegex("dino_.*")))
     return new_state, info
 
 
