@@ -258,6 +258,10 @@ class BaseModelConfig(abc.ABC):
         _, action_spec = self.inputs_spec(batch_size=batch_size)
         return jax.tree.map(lambda x: jnp.ones(x.shape, x.dtype), action_spec)
 
+    def get_lr_mult(self) -> tuple[nnx.filterlib.Filter, float] | None:
+        """Optional (filter, multiplier): trainable params matching the filter are trained at `lr * multiplier`."""
+        return None
+
 
 @dataclasses.dataclass
 class BaseModel(nnx.Module, abc.ABC):
