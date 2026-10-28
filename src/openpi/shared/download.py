@@ -105,9 +105,18 @@ def maybe_download(url: str, *, force_download: bool = False, **kwargs) -> pathl
     return local_path
 
 
+def _is_google_gsutil() -> bool:
+    """True if `gsutil` is Google's GCS tool. The Debian package `gsutil` installs an unrelated tool of the same name,
+    which ignores `cp` and exits with 0, leaving an empty download."""
+    if shutil.which("gsutil") is None:
+        return False
+    result = subprocess.run(["gsutil", "version"], capture_output=True, text=True, check=False)
+    return result.returncode == 0 and "gsutil version" in result.stdout
+
+
 def _download_gsutil(url: str, local_path: pathlib.Path, **kwargs) -> None:
     """Download a file or directory from GCS using gsutil if available, otherwise fall back to gcsfs."""
-    if shutil.which("gsutil") is None:
+    if not _is_google_gsutil():
         logger.warning(
             "gsutil not found, falling back to gcsfs. This may fail if GCP credentials are not configured correctly."
         )
