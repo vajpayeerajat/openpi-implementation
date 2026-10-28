@@ -18,9 +18,11 @@ import jax.numpy as jnp
 import numpy as np
 import safetensors.numpy
 
-Variant = Literal["B/16"]
+Variant = Literal["dummy", "B/16"]
 
 _VARIANTS = {
+    # Tiny random encoder for tests (no pretrained weights). Same 16x16 patch grid as B/16.
+    "dummy": {"width": 32, "depth": 2, "num_heads": 2, "mlp_dim": 64, "patch_size": 16, "num_registers": 4},
     "B/16": {"width": 768, "depth": 12, "num_heads": 12, "mlp_dim": 3072, "patch_size": 16, "num_registers": 4},
 }
 
@@ -117,6 +119,9 @@ class Module(nn.Module):
     # SigLIP So400m/14 at 224, so patch i of both encoders covers the same image region.
     image_size: int = 256
     dtype_mm: str = "float32"
+    # If set, returns the mean of the final-norm outputs of these blocks (0-based, negative counts from the end)
+    # instead of the output of the last block.
+    layers: tuple[int, ...] | None = None
 
     @nn.compact
     def __call__(self, image):
@@ -140,11 +145,17 @@ class Module(nn.Module):
         x = x.astype(self.dtype_mm)
 
         sin, cos = rope_sincos(h, w, width // cfg["num_heads"])
+        outputs = []
         for i in range(cfg["depth"]):
             x = Block(cfg["num_heads"], cfg["mlp_dim"], num_prefix, self.dtype_mm, name=f"encoderblock_{i}")(
                 x, sin, cos
             )
-        x = nn.LayerNorm(epsilon=_LN_EPS, dtype=self.dtype_mm, name="norm")(x)
+            outputs.append(x)
+        norm = nn.LayerNorm(epsilon=_LN_EPS, dtype=self.dtype_mm, name="norm")
+        if self.layers is None:
+            x = norm(x)
+        else:
+            x = jnp.mean(jnp.stack([norm(outputs[i]) for i in self.layers]), axis=0).astype(self.dtype_mm)
         return x[:, num_prefix:]
 
 
