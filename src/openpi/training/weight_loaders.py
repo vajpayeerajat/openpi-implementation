@@ -78,8 +78,8 @@ class PaliGemmaWeightLoader(WeightLoader):
 class DinoV3WeightLoader(WeightLoader):
     """Loads a pi0/pi05 checkpoint plus the pretrained DINOv3 encoder (for `Pi0Config.dino_variant`).
 
-    The DINO fusion layers (`dino_norm`, `dino_proj`) keep their initialization, so the model starts out identical
-    to the checkpoint. The DINOv3 weights are gated on the HF hub: accept the license and `huggingface-cli login`.
+    The DINO fusion layers (`dino_norm`, `dino_proj`, and for "expert_stream" also `dino_cam_emb`, `dino_gate`,
+    `dino_attn_gate`, `dino_ctx`) keep their initialization, so the model starts out identical to the checkpoint. The DINOv3 weights are gated on the HF hub: accept the license and `huggingface-cli login`.
     """
 
     # Same as `CheckpointWeightLoader.params_path`. None loads only the DINOv3 weights (for debug configs).
@@ -92,7 +92,7 @@ class DinoV3WeightLoader(WeightLoader):
             loaded_params = CheckpointWeightLoader(self.params_path).load(params)
         loaded_params = {**loaded_params, "dino": _dinov3.load_hf_params(self.variant)}
         logger.info(f"Loaded DINOv3 {self.variant} weights from {_dinov3.HF_REPO_IDS[self.variant]}")
-        missing_regex = "dino_(norm|proj)/.*" if self.params_path is not None else "(?!dino/).*"
+        missing_regex = "dino_.*" if self.params_path is not None else "(?!dino/).*"
         return _merge_params(loaded_params, params, missing_regex=missing_regex)
 
 
