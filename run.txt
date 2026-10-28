@@ -1,0 +1,41 @@
+# 0. Once per terminal
+export HF_LEROBOT_HOME=/mnt/drive2/rajat_ws/datasets
+uv run huggingface-cli login   # needed for the DINOv3 weights (license already accepted)
+
+# 1. Tests (CPU, ~2.5 min)
+JAX_PLATFORMS=cpu uv run pytest src/openpi/models/pi0_dino_test.py -v -p no:warnings
+
+# 2. Quick 10-step end-to-end check (tiny Gemma, real DINOv3, real data).
+#    The DINO gate and grad metrics will log 0 here (random-init adaRMS), which is expected.
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_g1_dex3_dino_expert_debug --exp-name=dino_expert_debug --overwrite
+
+# 3a. Full run: DINO tokens from all 3 cameras
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_g1_dex3_dino_expert \
+    --exp-name=dino_expert --overwrite --log-interval=50 --hub-tensorboard-interval=50 \
+    --hub-repo-id=rajat-vajpayee/pi05-g1-dex3-dino-expert 2>&1 | tee train_dino_expert.log
+
+# 3b. Full run: wrist cameras only
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_g1_dex3_dino_expert_wrist \
+    --exp-name=dino_expert_wrist --overwrite --log-interval=50 --hub-tensorboard-interval=50 \
+    --hub-repo-id=rajat-vajpayee/pi05-g1-dex3-dino-expert-wrist 2>&1 | tee train_dino_expert_wrist.log
+
+# Resume a stopped run: same command with --resume instead of --overwrite
+
+# 4. TensorBoard
+uvx tensorboard --logdir checkpoints/pi05_g1_dex3_dino_expert --port 6006
+
+# 5. Eval: offline MSE + counterfactuals + latency (replace 30000 with your step)
+uv run scripts/eval_dino_expert.py --config-name pi05_g1_dex3_dino_expert \
+    --checkpoint-dir checkpoints/pi05_g1_dex3_dino_expert/dino_expert/30000 --split val
+uv run scripts/eval_dino_expert.py --config-name pi05_g1_dex3_dino_expert_wrist \
+    --checkpoint-dir checkpoints/pi05_g1_dex3_dino_expert_wrist/dino_expert_wrist/30000 --split val
+#    Latency only, no checkpoint needed:
+uv run scripts/eval_dino_expert.py --no-accuracy
+
+# 6. Option-A check: is the old dino_proj still near zero?
+uv run huggingface-cli download rajat-vajpayee/pi05-g1-dex3-dinov3-b16-96gb \
+    --include "checkpoints/<step>/params/*" --local-dir hub_checkpoints/dinov3_b16
+uv run scripts/dino_param_norms.py hub_checkpoints/dinov3_b16/checkpoints/<step>/params
+#    The same script works on the new runs (prints the gate values and the norms of the new DINO weights):
+uv run scripts/dino_param_norms.py checkpoints/pi05_g1_dex3_dino_expert/dino_expert/30000/params
+
