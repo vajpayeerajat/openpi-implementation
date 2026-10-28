@@ -52,6 +52,10 @@ def make_attn_mask(input_mask, mask_ar):
     return jnp.logical_and(attn_mask, valid_mask)
 
 
+def _rms(x: at.Array) -> at.Array:
+    return jnp.sqrt(jnp.mean(jnp.square(x.astype(jnp.float32))))
+
+
 @at.typecheck
 def posemb_sincos(
     pos: at.Real[at.Array, " b"], embedding_dim: int, min_period: float, max_period: float
@@ -169,6 +173,13 @@ class Pi0(_model.BaseModel):
                 # same image region and they can be summed.
                 dino_tokens = jax.lax.stop_gradient(self.dino(obs.images[name]))
                 dino_tokens = self.dino_proj(self.dino_norm(dino_tokens))
+                if not self.deterministic:
+                    # logged by the train loop: size of the DINO term relative to the SigLIP tokens (0 at init).
+                    self.sow(
+                        nnx.Intermediate,
+                        f"dino_siglip_ratio_{name}",
+                        _rms(dino_tokens) / jnp.maximum(_rms(image_tokens), 1e-12),
+                    )
                 # RAJAT :  This is the addition of DINO tokens to SigLIP tokens
                 # As of now, its direct element wise addition of the two tokens similar to OpenVLA.
                 # TODO : Bi-directional attention between DINO and SigLIP tokens, where
