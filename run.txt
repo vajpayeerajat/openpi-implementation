@@ -1,5 +1,7 @@
 # 0. Once per terminal
 export HF_LEROBOT_HOME=/mnt/drive2/rajat_ws/datasets
+export LD_LIBRARY_PATH=$HOME/ffmpeg/lib:$LD_LIBRARY_PATH
+export HF_LEROBOT_HOME=/home/rajat/work/Datasets/hf_lerobot
 uv run huggingface-cli login   # needed for the DINOv3 weights (license already accepted)
 
 # 1. Tests (CPU, ~2.5 min)
@@ -11,7 +13,11 @@ XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_g1_dex3_dino_exp
 
 # 3a. Full run: DINO tokens from all 3 cameras
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_g1_dex3_dino_expert \
-    --exp-name=dino_expert --overwrite --log-interval=50 --hub-tensorboard-interval=50 \
+    --exp-name=dino_expert --overwrite --log-interval=50 --hub-tensorboard-interval=50 --batch_size=2 \
+    --hub-repo-id=rajat-vajpayee/pi05-g1-dex3-dino-expert 2>&1 | tee train_dino_expert.log
+
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_g1_dex3_dino_expert \
+    --exp-name=dino_expert --overwrite --log-interval=10 --hub-tensorboard-interval=10 --batch_size=2 --save_interval=10 \
     --hub-repo-id=rajat-vajpayee/pi05-g1-dex3-dino-expert 2>&1 | tee train_dino_expert.log
 
 # 3b. Full run: wrist cameras only

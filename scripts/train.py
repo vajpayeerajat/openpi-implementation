@@ -330,6 +330,12 @@ def main(config: _config.TrainConfig):
     logging.info(f"Initialized train state:\n{training_utils.array_tree_to_info(train_state.params)}")
 
     if resuming:
+        latest_step = checkpoint_manager.latest_step()
+        if not (config.checkpoint_dir / str(latest_step) / "train_state").exists():
+            raise ValueError(
+                f"Checkpoint {latest_step} has no optimizer state (saved with --no-save-train-state), so it can't be "
+                "resumed. Start a new run instead."
+            )
         train_state = _checkpoints.restore_state(checkpoint_manager, train_state, data_loader)
 
     ptrain_step = jax.jit(
@@ -408,7 +414,9 @@ def main(config: _config.TrainConfig):
             if hub is not None:
                 # Saving deletes the previous local checkpoint, so its upload must have finished.
                 hub.wait()
-            _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
+            _checkpoints.save_state(
+                checkpoint_manager, train_state, data_loader, step, save_train_state=config.save_train_state
+            )
             if hub is not None:
                 # Upload only fully written checkpoints.
                 checkpoint_manager.wait_until_finished()

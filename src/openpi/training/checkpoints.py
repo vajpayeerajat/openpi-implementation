@@ -67,6 +67,8 @@ def save_state(
     state: training_utils.TrainState,
     data_loader: _data_loader.DataLoader,
     step: int,
+    *,
+    save_train_state: bool = True,
 ):
     def save_assets(directory: epath.Path):
         # Save the normalization stats.
@@ -80,9 +82,10 @@ def save_state(
         train_state, params = _split_params(state)
     items = {
         "assets": save_assets,
-        "train_state": train_state,
         "params": {"params": params},
     }
+    if save_train_state:
+        items["train_state"] = train_state
     checkpoint_manager.save(step, items)
 
 

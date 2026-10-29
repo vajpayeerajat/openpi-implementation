@@ -564,6 +564,9 @@ class TrainConfig:
     save_interval: int = 1000
     # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
     keep_period: int | None = 5000
+    # If false, checkpoints only hold the inference params and norm stats, not the optimizer state (a few times
+    # smaller, and much less host memory while saving), but such a run can't be continued with --resume.
+    save_train_state: bool = True
 
     # If true, will overwrite the checkpoint directory if it already exists.
     overwrite: bool = False
