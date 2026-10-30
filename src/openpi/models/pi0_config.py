@@ -54,6 +54,10 @@ class Pi0Config(_model.BaseModelConfig):
     # Learning rate multiplier for the new DINO fusion params (not the encoder).
     dino_lr_mult: float = 10.0
     dino_freeze_encoder: bool = True
+    # tanh(dino_attn_gate) at init: how open the action tokens' attention to the DINO tokens starts. 0 keeps the model
+    # identical to pi0/pi05 at init, but then the attention gate and the (also zero) token gate each get gradient only
+    # through the other and can stay closed; a small value like 0.2 gives the DINO branch gradient from the start.
+    dino_attn_gate_init: float = 0.0
 
     pytorch_compile_mode: str | None = "max-autotune"
 
@@ -66,6 +70,8 @@ class Pi0Config(_model.BaseModelConfig):
             object.__setattr__(self, "dino_fusion", "prefix_add")
         if self.dino_fusion != "none" and self.dino_variant is None:
             raise ValueError(f"dino_fusion={self.dino_fusion!r} needs a dino_variant.")
+        if not -1.0 < self.dino_attn_gate_init < 1.0:
+            raise ValueError(f"dino_attn_gate_init={self.dino_attn_gate_init} must be in (-1, 1) (it is a tanh value).")
         if self.pytorch_compile_mode is not None:
             assert self.pytorch_compile_mode in [
                 "default",

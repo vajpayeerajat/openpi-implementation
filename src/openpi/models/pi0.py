@@ -137,10 +137,11 @@ class Pi0(_model.BaseModel):
             self.dino_proj = nnx.Linear(dino_width, width, rngs=rngs)
             self.dino_cam_emb = nnx.Param(nnx.initializers.normal(0.02)(rngs.params(), (len(self.dino_cameras), width)))
             # Per-channel gate on the tokens and a scalar gate on the action tokens' attention to them, both
-            # applied as tanh(gate) and zero at init. The attention gate gets gradient at init and opens first;
-            # the token gate (and then the projection) start learning once it is non-zero.
+            # applied as tanh(gate). The token gate is zero at init; the attention gate starts at
+            # tanh^-1(dino_attn_gate_init) (zero by default). The token gate (and then the projection) learn at a
+            # rate proportional to tanh(dino_attn_gate).
             self.dino_gate = nnx.Param(jnp.zeros((width,)))
-            self.dino_attn_gate = nnx.Param(jnp.zeros(()))
+            self.dino_attn_gate = nnx.Param(jnp.full((), np.arctanh(config.dino_attn_gate_init), dtype=jnp.float32))
             if config.pi05:
                 # Learned offset to the adaRMS cond of the DINO tokens (the time cond at t=_DINO_CTX_TIME). It does
                 # not depend on the flow timestep, so their K/V can be cached across denoising steps.

@@ -1193,6 +1193,11 @@ _CONFIGS += [
         dino_cameras=("left_wrist_0_rgb", "right_wrist_0_rgb"),
     ),
     _g1_dex3_with_dinov3("pi05_g1_dex3_debug", "pi05_g1_dex3_dino_expert_debug", dino_fusion="expert_stream"),
+    # Same as pi05_g1_dex3_dino_expert, with the attention gate starting open (tanh = 0.2) instead of at zero: with
+    # both gates at zero, the gates stayed closed (|tanh(dino_attn_gate)| ~ 1e-3 after 20k steps).
+    _g1_dex3_with_dinov3(
+        "pi05_g1_dex3", "pi05_g1_dex3_dino_expert_open", dino_fusion="expert_stream", dino_attn_gate_init=0.2
+    ),
 ]
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):

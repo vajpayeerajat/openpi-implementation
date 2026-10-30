@@ -53,7 +53,9 @@ from PIL import Image
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 DEFAULT_CONFIG = "pi05_g1_dex3"
-DATASET_ROOT = "/mnt/drive2/rajat_ws/datasets/splitted_lerobot_and_school"
+# Same layout as training: $HF_LEROBOT_HOME/splitted_lerobot_and_school/{train,val,test}
+DATASET_ROOT = (os.path.join(os.environ["HF_LEROBOT_HOME"], "splitted_lerobot_and_school") if "HF_LEROBOT_HOME" in os.environ
+                else "/mnt/drive2/rajat_ws/datasets/splitted_lerobot_and_school")
 FPS = 20
 STOPWORDS = {"a", "an", "the", "and", "or", "in", "on", "at", "to", "it", "is", "of", "up", "with", "for"}
 
@@ -65,6 +67,7 @@ ACTION_GROUPS = {"left_arm": slice(0, 7), "left_hand": slice(7, 14), "right_arm"
 REAL_DIM = 28
 CAM_TARGETS = ("all", "right_arm", "right_hand", "left_arm")  # Grad-CAM score variants (left hand never moves)
 INPUT_GROUPS = ("ego_view", "left_wrist", "right_wrist", "prompt:task", "prompt:state", "prompt:template")
+# + "dino:<camera>" after the cameras for "expert_stream" checkpoints (set in analyse)
 SHORT_HORIZON = 10  # steps (0.5 s at 20 fps): roughly what is executed before the next inference; --short_horizon
 
 # Verdict thresholds (relative loss increase when an input is removed / swapped)
@@ -305,8 +308,10 @@ def token_groups(cleaned, full, offsets):
 # Backend (pi05). Exposes:
 #   layout: cams -> prefix indices [tpi], grid, text_start
 #   losses(batch, actions, noise, t) -> [B, D] per-dim flow-matching MSE (mean over draws and horizon)
-#   gradcam(batch1, actions1, noise, t, gmat) -> {target: (act [P,E] f32, grad [P,E] f32, extra [(act, grad)] per cam)}
+#   gradcam(batch1, actions1, noise, t, gmat) -> {target: (act [P,E] f32, grad [P,E] f32, extra [(act, grad)] per cam,
+#                                                          dino (act [S,E], grad [S,E]) or None)}
 #   sample(batch, noise1) -> [B, H, D] normalized actions
+#   dino_index: {camera: DINO token indices} ("expert_stream" checkpoints, else empty)
 # ============================================================================
 
 
@@ -330,18 +335,39 @@ class Pi05Backend:
         graphdef, self.state = nnx.split(model)
         self._graphdef = graphdef
         self.tokenizer = PaligemmaTokenizer(self.cfg.max_token_len)
-        self.label = "pi05 (PaliGemma 3B, JAX)"
+        # "expert_stream": DINOv3 tokens in the action-expert stream, cached with the prefix and read by the action
+        # tokens through the tanh-gated attention block. ("prefix_add" DINO is already inside embed_prefix.)
+        self.has_dino = getattr(self.cfg, "dino_fusion", "none") == "expert_stream"
+        self.label = "pi05 (PaliGemma 3B, JAX)" + (" + DINOv3 expert stream" if self.has_dino else "")
+        # DINO token indices per camera (in the order of embed_dino): {camera name: [indices]}
+        self.dino_index = {}
+        if self.has_dino:
+            n = (model.dino_grid // model.dino_pool) ** 2
+            for i, name in enumerate(model.dino_cameras):
+                self.dino_index[CAMERA_NAMES[MODEL_CAMERAS.index(name)]] = np.arange(i * n, (i + 1) * n)
 
         def embed(state, obs):
+            """-> prefix (tokens, mask, ar), and the expert-stream DINO (tokens, mask, ar, position index) or None."""
             m = nnx.merge(graphdef, state)
-            return m.embed_prefix(_model.preprocess_observation(None, obs, train=False))
+            obs = _model.preprocess_observation(None, obs, train=False)
+            return m.embed_prefix(obs), (m.embed_dino(obs) if self.has_dino else None)
 
-        def sqerr(state, tokens, mask, ar, x_t, t, u_t):
+        def sqerr(state, tokens, mask, ar, dino, x_t, t, u_t):
             m = nnx.merge(graphdef, state)
             rep = x_t.shape[0] // tokens.shape[0]
-            _, kv = m.PaliGemma.llm([tokens, None], mask=make_attn_mask(mask, ar), positions=jnp.cumsum(mask, 1) - 1)
+            positions = jnp.cumsum(mask, 1) - 1
+            if dino is None:
+                cache_mask = mask
+                _, kv = m.PaliGemma.llm([tokens, None], mask=make_attn_mask(mask, ar), positions=positions)
+            else:
+                # Model._fill_kv_cache for "expert_stream", from the given (differentiable) prefix and DINO tokens
+                dtok, dmask, dar, dpos = dino
+                cache_mask = jnp.concatenate([mask, dmask], 1)
+                _, kv = m.PaliGemma.llm([tokens, dtok], mask=make_attn_mask(cache_mask, jnp.concatenate([ar, dar])),
+                                        positions=jnp.concatenate([positions, positions[:, dpos]], 1),
+                                        adarms_cond=[None, m._dino_ctx_cond(tokens.shape[0])])  # noqa: SLF001
             kv = jax.tree.map(lambda a: jnp.repeat(a, rep, axis=1), kv)
-            mask_r = jnp.repeat(mask, rep, axis=0)
+            mask_r = jnp.repeat(cache_mask, rep, axis=0)
             # Model.embed_suffix for pi05 (inlined: it type-checks an Observation it does not use for pi05)
             act = m.action_in_proj(x_t)
             temb = posemb_sincos(t, m.action_in_proj.out_features, min_period=4e-3, max_period=4.0)
@@ -350,30 +376,43 @@ class Pi05Backend:
             smask = jnp.ones((x_t.shape[0], h), jnp.bool_)
             full = jnp.concatenate([jnp.repeat(mask_r[:, None], h, axis=1),
                                     make_attn_mask(smask, jnp.array([True] + [False] * (h - 1)))], axis=-1)
-            pos = jnp.sum(mask_r, -1)[:, None] + jnp.cumsum(smask, -1) - 1
-            (_, out), _ = m.PaliGemma.llm([None, act], mask=full, positions=pos, kv_cache=kv, adarms_cond=[None, cond])
+            gated = None
+            if dino is not None:
+                # the action tokens read the cached DINO tokens only through the gated attention block
+                key_idx, c = jnp.arange(full.shape[-1]), cache_mask.shape[1]
+                full, gated = m._dino_gated_attn(  # noqa: SLF001
+                    full, jnp.ones(h, jnp.bool_), (key_idx >= c - dino[0].shape[1]) & (key_idx < c))
+            # positions continue after the valid prefix tokens (DINO tokens reuse prefix positions)
+            pos = jnp.repeat(jnp.sum(mask, -1), rep)[:, None] + jnp.cumsum(smask, -1) - 1
+            (_, out), _ = m.PaliGemma.llm([None, act], mask=full, positions=pos, kv_cache=kv, adarms_cond=[None, cond],
+                                          gated_attn=gated)
             v = m.action_out_proj(out[:, -h:])
             return jnp.square(v.astype(jnp.float32) - u_t)
 
-        def losses(state, obs, actions, noise, t):
-            tokens, mask, ar = embed(state, obs)
+        def losses(state, obs, actions, noise, t, dino_off):
+            (tokens, mask, ar), dino = embed(state, obs)
+            if dino is not None:
+                # dino_off [B]: mask out that sample's DINO tokens (the gated block then contributes exactly 0)
+                dino = (dino[0], dino[1] & ~dino_off[:, None], *dino[2:])
             b, r = actions.shape[0], noise.shape[0]
             a = jnp.repeat(actions, r, 0)
             nz, tt = jnp.tile(noise, (b, 1, 1)), jnp.tile(t, b)
             x_t = tt[:, None, None] * nz + (1 - tt[:, None, None]) * a
-            se = sqerr(state, tokens, mask, ar, x_t, tt, nz - a)
+            se = sqerr(state, tokens, mask, ar, dino, x_t, tt, nz - a)
             return se.reshape(b, r, *se.shape[1:]).mean((1, 2))
 
-        def group_losses(tokens, state, mask, ar, actions, noise, t, gmat):
+        def group_losses(tokens, dino_tokens, state, mask, ar, dino_rest, actions, noise, t, gmat):
             r = noise.shape[0]
             a = jnp.repeat(actions, r, 0)
             x_t = t[:, None, None] * noise + (1 - t[:, None, None]) * a
-            per_dim = sqerr(state, tokens, mask, ar, x_t, t, noise - a).mean((0, 1))
+            dino = None if dino_rest is None else (dino_tokens, *dino_rest)
+            per_dim = sqerr(state, tokens, mask, ar, dino, x_t, t, noise - a).mean((0, 1))
             return (gmat @ per_dim) / gmat.sum(1)
 
         self._embed = jax.jit(embed)
         self._losses = jax.jit(losses)
-        self._jac = jax.jit(jax.jacrev(group_losses))
+        # gradients w.r.t. the prefix tokens, and the DINO tokens (what the action expert sees, after the tanh gate)
+        self._jac = jax.jit(jax.jacrev(group_losses, argnums=(0, 1) if self.has_dino else 0))
         self._sample = jax.jit(lambda state, obs, noise: nnx.merge(graphdef, state).sample_actions(
             jax.random.key(0), obs, num_steps=num_steps, noise=noise))
 
@@ -386,14 +425,21 @@ class Pi05Backend:
     def _obs(self, batch):
         return self._model.Observation.from_dict(self.jax.tree.map(self.jnp.asarray, batch))
 
-    def losses(self, batch, actions, noise, t):
-        return np.asarray(self._losses(self.state, self._obs(batch), self.jnp.asarray(actions), noise, t))
+    def losses(self, batch, actions, noise, t, dino_off=None):
+        dino_off = np.zeros(len(actions), bool) if dino_off is None else np.asarray(dino_off, bool)
+        return np.asarray(self._losses(self.state, self._obs(batch), self.jnp.asarray(actions), noise, t, dino_off))
 
     def gradcam(self, batch, actions, noise, t, gmat):
-        tokens, mask, ar = self._embed(self.state, self._obs(batch))
-        jac = self._jac(tokens, self.state, mask, ar, self.jnp.asarray(actions), noise, t, gmat)  # [G, 1, P, E]
+        """-> {target: (act [P, E], grad [P, E], extra, dino)}; dino = (act [S, E], grad [S, E]) or None."""
+        (tokens, mask, ar), dino = self._embed(self.state, self._obs(batch))
+        dino_tokens, dino_rest = (None, None) if dino is None else (dino[0], tuple(dino[1:]))
+        jac = self._jac(tokens, dino_tokens, self.state, mask, ar, dino_rest, self.jnp.asarray(actions), noise, t, gmat)
+        jac, djac = jac if self.has_dino else (jac, None)  # [G, 1, P, E], [G, 1, S, E]
         act = np.asarray(tokens[0], np.float32)
-        return {g: (act, -np.asarray(jac[i, 0], np.float32), []) for i, g in enumerate(CAM_TARGETS)}
+        dact = None if dino is None else np.asarray(dino_tokens[0], np.float32)
+        return {g: (act, -np.asarray(jac[i, 0], np.float32), [],
+                    None if dino is None else (dact, -np.asarray(djac[i, 0], np.float32)))
+                for i, g in enumerate(CAM_TARGETS)}
 
     def sample(self, batch, noise1):
         b = batch["state"].shape[0]
@@ -402,7 +448,7 @@ class Pi05Backend:
     def text_groups(self, prompt, state28):
         cleaned, full = pi05_prompt_string(prompt, state28)
         sp = self.tokenizer._tokenizer  # noqa: SLF001
-        proto = sp.encode(full, out_type="proto")
+        proto = sp.encode_as_immutable_proto(full)  # encode(out_type="proto") returns serialized bytes in 0.2
         offsets = [(-1, -1)] + [(p.begin, p.end) for p in proto.pieces]  # BOS first
         ids = np.asarray([sp.bos_id()] + [p.id for p in proto.pieces])
         return (ids, *token_groups(cleaned, full, offsets))
@@ -456,8 +502,10 @@ def gradcam_maps(act, grad, extra, backend, valid):
     return maps
 
 
-def input_group_shares(r, backend, text_groups):
+def input_group_shares(r, backend, text_groups, r_dino=None):
     shares = {c: r[backend.cam_index[c]].sum() for c in CAMERA_NAMES}
+    for c, idx in backend.dino_index.items():
+        shares[f"dino:{c}"] = r_dino[idx].sum()
     for g, label in [("task", "prompt:task"), ("state", "prompt:state"), ("other", "prompt:template")]:
         shares[label] = r[backend.text_start + np.asarray(text_groups[g], int)].sum() if text_groups[g] else 0.0
     shares["prompt:template"] += r[backend.special_index].sum() if len(backend.special_index) else 0.0
@@ -513,6 +561,7 @@ def cam_lift(cam_up, mask, valid):
 
 
 def analyse(args):
+    global INPUT_GROUPS  # noqa: PLW0603
     Backend, config, config_name = detect_backend(args.checkpoint, args.config_name)
     step = Path(args.checkpoint.rstrip("/")).name
     run = Path(args.checkpoint.rstrip("/")).parent.name
@@ -521,6 +570,7 @@ def analyse(args):
     print(f"[out] {out_dir}")
 
     backend = Backend(config, args.checkpoint, args.num_steps)
+    INPUT_GROUPS = (*CAMERA_NAMES, *(f"dino:{c}" for c in backend.dino_index), *INPUT_GROUPS[len(CAMERA_NAMES):])
     inp, out_tf, mid_state = build_transforms(config, args.checkpoint, args.asset)
     horizon, adim = config.model.action_horizon, config.model.action_dim
     data_check = {"val": idle_episodes(args.val_dir), "train": idle_episodes(args.train_dir)}
@@ -535,6 +585,9 @@ def analyse(args):
     sample_noise = np.random.default_rng(args.seed + 1).standard_normal((horizon, adim)).astype(np.float32)
 
     variants = ["base", "-ego_view", "-left_wrist", "-right_wrist", "-all_cameras", "scene_swap", "-state", "swap_prompt"]
+    if backend.dino_index:
+        variants.append("-dino")  # the expert-stream DINO tokens masked out (= the model without DINO)
+    dino_off = np.array([v == "-dino" for v in variants])
     rows, cams_to_plot = [], []
     t0 = _time.time()
     for si, s in enumerate(samples):
@@ -566,7 +619,7 @@ def analyse(args):
         actions = np.repeat(base["actions"][None].astype(np.float32), len(variants), 0)
 
         # 1) losses of every variant, per action dim -> per joint group
-        per_dim = backend.losses(batch, actions, noise, times)  # [V, D]
+        per_dim = backend.losses(batch, actions, noise, times, dino_off)  # [V, D]
         row = {k: s[k] for k in ("episode", "frame", "progress", "task_index", "phase")}
         row["target"] = target_colour(s["task"])
         for vi, v in enumerate(variants):
@@ -575,7 +628,7 @@ def analyse(args):
                 row[f"loss[{v}]_{g}"] = float(per_dim[vi, sl].mean())
 
         # 2) sampled actions (base + swapped prompt) vs GT and the hold-still baseline, in robot units
-        sampled = backend.sample(to_model_batch([items[0], items[-1]]), sample_noise)
+        sampled = backend.sample(to_model_batch([items[0], items[variants.index("swap_prompt")]]), sample_noise)
         abs_actions = [out_tf({"state": base["state"], "actions": a})["actions"] for a in sampled]
         gt, hold = s["gt_actions"], np.repeat(s["state"][None], horizon, 0)
         for g, sl in ACTION_GROUPS.items():
@@ -596,11 +649,12 @@ def analyse(args):
         valid = content_mask(ego_img)
         tok_valid = {c: token_valid(np.asarray(base["image"][k]), backend.grid) for c, k in zip(CAMERA_NAMES, MODEL_CAMERAS)}
         sample_maps = {}
-        for target, (act, grad, extra) in gc.items():
+        for target, (act, grad, extra, dino) in gc.items():
             r = token_attribution(act, grad, extra, backend)
+            r_dino = None if dino is None else np.abs((dino[1] * dino[0]).sum(-1))
             maps = gradcam_maps(act, grad, extra, backend, tok_valid)
             sample_maps[target] = maps
-            for k, v in input_group_shares(r, backend, tgroups).items():
+            for k, v in input_group_shares(r, backend, tgroups, r_dino).items():
                 row[f"share[{target}]_{k}"] = v
             if target == "all":
                 for w, v in word_shares(r, backend, word_map).items():
@@ -624,7 +678,8 @@ def analyse(args):
     meta = {"checkpoint": str(args.checkpoint), "config": config_name, "model": backend.label, "kind": backend.kind,
             "horizon": horizon, "short_horizon": SHORT_HORIZON, "prompt_prefix": PROMPT_PREFIX,
             "n_samples": len(df), "n_noise": args.n_noise, "num_steps": args.num_steps, "val_dir": str(args.val_dir),
-            "grid": backend.grid, "include_idle": bool(args.include_idle), "data_check": data_check}
+            "grid": backend.grid, "include_idle": bool(args.include_idle), "data_check": data_check,
+            "input_groups": list(INPUT_GROUPS)}
     summary = summarize(df, meta)
     json.dump(summary, open(out_dir / "summary.json", "w"), indent=2)
     make_figures(df, cams_to_plot, out_dir, meta)
@@ -660,7 +715,8 @@ def summarize(df, meta):
         p: {g: float(d[f"mae_short_{g}"].mean() / max(d[f"hold_short_{g}"].mean(), 1e-9)) for g in ("right_arm", "right_hand")}
         for p, d in df.groupby("phase")}
     s["ablation"] = {v: {"all": _rel(df, v), **{g: _rel(df, v, group=g) for g in ("right_arm", "right_hand")}}
-                     for v in ("-ego_view", "-left_wrist", "-right_wrist", "-all_cameras", "scene_swap", "-state")}
+                     for v in ("-ego_view", "-left_wrist", "-right_wrist", "-all_cameras", "scene_swap", "-state", "-dino")
+                     if f"loss[{v}]" in df}
     # Instruction matters only where it disambiguates: frames with both octopi visible on the ego view.
     two = (df["area_pink"] >= MIN_OBJ_AREA) & (df["area_blue"] >= MIN_OBJ_AREA)
     one = ~two
@@ -741,6 +797,17 @@ def verdicts(s):
               + (" -> the cameras are redundant; none is individually essential." if max(cams.values()) < NEGLIGIBLE <= vision
                  else "")))
     v.append(("inputs", "INFO", f"Removing the state from the prompt: loss {_fmt(sd, True)}"))
+    if "-dino" in abl:
+        dd = abl["-dino"]
+        dshare = sum(x for k, x in s["grad_shares"]["all"].items() if k.startswith("dino:"))
+        st = "WARN" if dd["all"] < NEGLIGIBLE else "OK"
+        v.append(("inputs", st, f"DINO tokens (action expert): removing them changes the loss {_fmt(dd['all'], True)} "
+                                f"(right arm {_fmt(dd['right_arm'], True)}, right hand {_fmt(dd['right_hand'], True)}); "
+                                f"{100 * dshare:.0f}% of the gradient attribution "
+                                f"({'not used yet' if st == 'WARN' else 'used'})."))
+        if st == "WARN":
+            acts.append("The DINO branch barely changes the predictions: check dino_attn_gate / dino_gate in the training "
+                        "log (still ~0?) and train longer, or raise dino_lr_mult.")
     if vision < NEGLIGIBLE:
         acts.append("Vision is not used. " + (
             "With a frozen VLM, unfreeze the vision merger / LoRA (stage 2) so the expert gets task-relevant features."
@@ -817,7 +884,8 @@ def verdicts(s):
 # ============================================================================
 
 PALETTE = {"ego_view": "#4C72B0", "left_wrist": "#A0A0A0", "right_wrist": "#55A868", "prompt:task": "#C44E52",
-           "prompt:state": "#DD8452", "prompt:template": "#D9D9D9"}
+           "prompt:state": "#DD8452", "prompt:template": "#D9D9D9", "dino:ego_view": "#9BB1D6",
+           "dino:left_wrist": "#CFCFCF", "dino:right_wrist": "#A3D1AE"}
 plt.rcParams.update({"font.size": 9, "axes.spines.top": False, "axes.spines.right": False, "axes.titleweight": "bold",
                      "axes.titlesize": 10, "figure.dpi": 100})
 
@@ -933,11 +1001,12 @@ def make_figures(df, cams_to_plot, out_dir, meta):
     ax.legend(ncol=3, fontsize=7, loc="upper center", bbox_to_anchor=(0.5, -0.08), frameon=False)
 
     ax = axes[0, 1]
+    has_dino = "loss[-dino]" in df
     abl = [("-ego_view", "no ego_view"), ("-left_wrist", "no left_wrist"), ("-right_wrist", "no right_wrist"),
-           ("-all_cameras", "no cameras"), ("scene_swap", "other episode's scene"), ("-state", "no state"),
-           ("swap_prompt", "other instruction")]
+           ("-all_cameras", "no cameras"), ("scene_swap", "other episode's scene"),
+           *([("-dino", "no DINO tokens")] if has_dino else []), ("-state", "no state"), ("swap_prompt", "other instruction")]
     d = np.array([100 * _rel(df, v) for v, _ in abl])
-    colors = ["#4C72B0"] * 5 + ["#DD8452", "#C44E52"]
+    colors = ["#4C72B0"] * 5 + ["#8172B3"] * has_dino + ["#DD8452", "#C44E52"]
     ax.barh([lab for _, lab in abl], d, color=colors)
     ax.axvspan(-100 * NEGLIGIBLE, 100 * NEGLIGIBLE, color="0.92", zorder=0, label=f"negligible (±{100 * NEGLIGIBLE:.0f}%)")
     ax.axvline(0, color="k", lw=0.8)
@@ -1099,6 +1168,10 @@ def write_report(s, df, out_dir):
     L += ["", f"All three cameras removed: **{_fmt(s['ablation']['-all_cameras']['all'], True)}**; cameras showing "
           f"another episode's scene: **{_fmt(s['ablation']['scene_swap']['all'], True)}** (right arm "
           f"{_fmt(s['ablation']['scene_swap']['right_arm'], True)}, right hand {_fmt(s['ablation']['scene_swap']['right_hand'], True)}).",
+          *([f"DINO tokens (action expert) removed: **{_fmt(s['ablation']['-dino']['all'], True)}** (right arm "
+             f"{_fmt(s['ablation']['-dino']['right_arm'], True)}, right hand {_fmt(s['ablation']['-dino']['right_hand'], True)}). "
+             "Removing a camera also removes its DINO tokens; `dino:<camera>` rows are the gradient on the DINO tokens "
+             "as the action expert sees them (after the tanh gate)."] if "-dino" in s["ablation"] else []),
           "", "Prompt:task 'removed' = instruction swapped for the other task. Gradient shares show sensitivity; the loss "
           "change shows what the model actually needs. Trust a conclusion when both agree.", "",
           "### By phase (gradient share, all joints)", "", "| phase | " + " | ".join(INPUT_GROUPS) + " |",
@@ -1142,11 +1215,12 @@ def compare(dirs, out):
     row("val loss", lambda r: f"{r['val_loss']:.4f}")
     for g in ("right_arm", "right_hand"):
         row(f"skill {g} (first {SHORT_HORIZON}, lower better)", lambda r, g=g: f"{r['accuracy'][f'{g}_short']['skill']:.2f}")
-    for v in ("-all_cameras", "scene_swap", "-state"):
+    for v in ("-all_cameras", "scene_swap", "-state", "-dino"):
         row(f"loss change {v}", lambda r, v=v: _fmt(r["ablation"][v]["all"], True))
     row("instruction swap, both octopi visible", lambda r: _fmt(r["language"]["swap_two_object"], True))
     row("target-object CAM lift (approach)", lambda r: _fmt(r["grounding"]["all"]["approach_target_lift_median"]))
-    for k in INPUT_GROUPS:
+    groups = list(dict.fromkeys(k for r in runs for k in r["meta"].get("input_groups", INPUT_GROUPS)))
+    for k in groups:
         row(f"grad share {k}", lambda r, k=k: f"{100 * r['grad_shares']['all'][k]:.0f}%")
     L += ["", "![metrics](compare_metrics.png)", "", "![gradcam](compare_gradcam.png)", ""]
     L += ["## Verdicts per checkpoint", ""]
@@ -1178,8 +1252,8 @@ def compare(dirs, out):
     axes[1].set_title("Causal reliance on inputs")
     axes[1].legend(fontsize=8, frameon=False)
     left = np.zeros(n)
-    for k in INPUT_GROUPS:
-        vals = np.array([r["grad_shares"]["all"][k] for r in runs])
+    for k in groups:
+        vals = np.array([r["grad_shares"]["all"].get(k, 0.0) for r in runs])
         axes[2].barh(names, vals, left=left, color=PALETTE[k], label=k, edgecolor="white")
         for i, (l, v) in enumerate(zip(left, vals)):
             if v > 0.06:

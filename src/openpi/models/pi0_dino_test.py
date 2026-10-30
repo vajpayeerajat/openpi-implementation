@@ -160,6 +160,30 @@ def test_gradient_flows():
         np.testing.assert_array_equal(a, b)
 
 
+def test_attn_gate_init():
+    """With both gates at zero the token gate gets no gradient at step 0; an open attention gate gives it some."""
+    obs, actions = _obs_and_actions(_config(**_EXPERT))
+
+    def token_gate_grad(attn_gate_init):
+        config = _config(**_EXPERT, dino_attn_gate_init=attn_gate_init)
+        model = _create(config)
+        # _create zeroes both gates; restore the configured init of the attention gate.
+        model.dino_attn_gate.value = config.create(jax.random.key(0)).dino_attn_gate.value
+        np.testing.assert_allclose(jnp.tanh(model.dino_attn_gate.value), attn_gate_init, rtol=1e-6)
+        trainable = nnx.All(nnx.Param, nnx.Not(config.get_freeze_filter()))
+
+        @nnx.jit
+        def grads(model):
+            return nnx.grad(
+                lambda m: jnp.mean(m.compute_loss(jax.random.key(5), obs, actions)), argnums=nnx.DiffState(0, trainable)
+            )(model)
+
+        return float(optax.global_norm(grads(model)["dino_gate"]))
+
+    assert token_gate_grad(0.0) == 0.0
+    assert token_gate_grad(0.2) > 0.0
+
+
 @pytest.mark.parametrize("dino_cameras", [None, ("left_wrist_0_rgb", "right_wrist_0_rgb")])
 def test_cache_consistency(dino_cameras):
     config = _config(**_EXPERT, dino_cameras=dino_cameras, dino_layers=(0, -1))
