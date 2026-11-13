@@ -504,7 +504,7 @@ def run(args):
 
     out_fps = args.out_fps or (G.FPS / max(1, args.record_stride) if args.recording and args.every_frame else 4.0)
     writer = imageio.get_writer(out_dir / "heatmaps.mp4", fps=out_fps, macro_block_size=1)
-    rows, t0 = [], _time.time()
+    rows, t0, last_png_slot = [], _time.time(), None
     lsl = None
     for fi, (t, cams, state, prompt) in enumerate(frames):
         item, present_raw = prepare(inp, cams, state, prompt)
@@ -561,8 +561,12 @@ def run(args):
                  f"{'' if args.records or args.states or args.recording else '   [state: mid-range placeholder]'}\n\"{prompt}\"")
         img = render(images, present, maps, shares, title)
         writer.append_data(img)
-        if not args.no_pngs:
-            plt.imsave(out_dir / "frames" / f"{fi:05d}.png", img)
+        # PNGs: every analysed frame, or (--png_every) the first analysed frame of each png_every-second window
+        slot = int(t // args.png_every) if args.png_every and not args.records else fi
+        if not args.no_pngs and slot != last_png_slot:
+            name = f"{fi:05d}_t{t:07.2f}s.png" if not args.records else f"{fi:05d}.png"
+            plt.imsave(out_dir / "frames" / name, img)
+            last_png_slot = slot
         el = _time.time() - t0
         print(f"[{fi + 1}] {tstr}  attn img {100 * sum(shares['attn'][c] for c in G.CAMERA_NAMES):.0f}%  "
               f"cam img {100 * sum(shares['cam'][c] for c in G.CAMERA_NAMES):.0f}%  ({el / (fi + 1):.1f} s/frame)")
@@ -612,6 +616,8 @@ def main():
                    help="--recording: analyse every video frame, not only the policy calls (one per 50 frames)")
     p.add_argument("--no_gradcam", action="store_true", help="attention only (about 4x faster)")
     p.add_argument("--no_pngs", action="store_true", help="do not write frames/*.png")
+    p.add_argument("--png_every", type=float, default=0.0,
+                   help="write a PNG only once per this many seconds (the video keeps every analysed frame); 0 = all")
     p.add_argument("--out_dir", default=None)
     run(p.parse_args())
 
