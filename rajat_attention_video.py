@@ -279,7 +279,10 @@ def frames_from_recording(args):
     rec = Path(args.recording)
     meta = json.loads((rec / "meta.json").read_text())
     steps = pd.read_csv(rec / "steps.csv")
-    calls = steps[steps["new_inference"] == 1].iloc[:: max(1, args.record_stride)]
+    # Default: only the ticks where the client called the policy. --every_frame: every recorded tick, i.e. what the
+    # model would have attended to had it been called at that frame (between calls the robot executes the old chunk).
+    calls = steps if args.every_frame else steps[steps["new_inference"] == 1]
+    calls = calls.iloc[:: max(1, args.record_stride)]
     if args.start:
         calls = calls[calls["t_elapsed"] >= args.start]
     if args.max_frames:
@@ -499,7 +502,8 @@ def run(args):
         if missing:
             print(f"[warn] no {'/'.join(missing)} wrist video: those cameras are masked out (never seen in training)")
 
-    writer = imageio.get_writer(out_dir / "heatmaps.mp4", fps=args.out_fps, macro_block_size=1)
+    out_fps = args.out_fps or (G.FPS / max(1, args.record_stride) if args.recording and args.every_frame else 4.0)
+    writer = imageio.get_writer(out_dir / "heatmaps.mp4", fps=out_fps, macro_block_size=1)
     rows, t0 = [], _time.time()
     lsl = None
     for fi, (t, cams, state, prompt) in enumerate(frames):
@@ -522,8 +526,12 @@ def run(args):
         if fi == 0:
             print("[jit] sampler done", flush=True)
         tokens, pmask, ar = backend._embed(backend.state, obs)  # noqa: SLF001
-        jac = backend._jac(tokens, backend.state, pmask, ar, jax.numpy.asarray(x0), noise, times, gmat)  # noqa: SLF001
-        act, grad, extra = np.asarray(tokens[0], np.float32), -np.asarray(jac[0, 0], np.float32), []
+        act, extra = np.asarray(tokens[0], np.float32), []
+        if args.no_gradcam:
+            grad = np.zeros_like(act)
+        else:
+            jac = backend._jac(tokens, backend.state, pmask, ar, jax.numpy.asarray(x0), noise, times, gmat)  # noqa: SLF001
+            grad = -np.asarray(jac[0, 0], np.float32)
 
         ids, word_map, tgroups = backend.text_groups(prompt, np.asarray(item["state"])[:state_dim])
         if not np.array_equal(ids, np.asarray(item["tokenized_prompt"])[np.asarray(item["tokenized_prompt_mask"], bool)]):
@@ -548,12 +556,13 @@ def run(args):
             row[f"cam_word_{w}"] = v
         rows.append(row)
 
-        tstr = f"t={t:.1f}s" if not args.records else f"call {t}"
-        title = (f"{config_name} @ {step}   {tstr}   Grad-CAM target: {args.target}"
+        tstr = f"t={t:.2f}s" if not args.records else f"call {t}"
+        title = (f"{config_name} @ {step}   {tstr}   Grad-CAM target: {'off' if args.no_gradcam else args.target}"
                  f"{'' if args.records or args.states or args.recording else '   [state: mid-range placeholder]'}\n\"{prompt}\"")
         img = render(images, present, maps, shares, title)
         writer.append_data(img)
-        plt.imsave(out_dir / "frames" / f"{fi:05d}.png", img)
+        if not args.no_pngs:
+            plt.imsave(out_dir / "frames" / f"{fi:05d}.png", img)
         el = _time.time() - t0
         print(f"[{fi + 1}] {tstr}  attn img {100 * sum(shares['attn'][c] for c in G.CAMERA_NAMES):.0f}%  "
               f"cam img {100 * sum(shares['cam'][c] for c in G.CAMERA_NAMES):.0f}%  ({el / (fi + 1):.1f} s/frame)")
@@ -597,7 +606,12 @@ def main():
     p.add_argument("--num_steps", type=int, default=10, help="denoising steps (same as serving)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--fp32", action="store_true", help="load the weights in float32 (default bfloat16, as served)")
-    p.add_argument("--out_fps", type=float, default=4.0, help="frame rate of heatmaps.mp4")
+    p.add_argument("--out_fps", type=float, default=None,
+                   help="frame rate of heatmaps.mp4 (default: real time with --every_frame, else 4)")
+    p.add_argument("--every_frame", action="store_true",
+                   help="--recording: analyse every video frame, not only the policy calls (one per 50 frames)")
+    p.add_argument("--no_gradcam", action="store_true", help="attention only (about 4x faster)")
+    p.add_argument("--no_pngs", action="store_true", help="do not write frames/*.png")
     p.add_argument("--out_dir", default=None)
     run(p.parse_args())
 
